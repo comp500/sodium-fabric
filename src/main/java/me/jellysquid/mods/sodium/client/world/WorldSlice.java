@@ -316,7 +316,7 @@ public class WorldSlice extends ReusableObject implements BlockRenderView, Biome
 
     @Override
     public BlockEntity getBlockEntity(BlockPos pos) {
-        return this.getBlockEntity(pos, WorldChunk.CreationType.IMMEDIATE);
+        return this.getBlockEntity(pos, WorldChunk.CreationType.CHECK);
     }
 
     public BlockEntity getBlockEntity(BlockPos pos, WorldChunk.CreationType type) {
