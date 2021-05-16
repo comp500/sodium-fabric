@@ -73,10 +73,10 @@ public class WorldSlice extends ReusableObject implements BlockRenderView, Biome
     private static final int SECTION_TABLE_ARRAY_SIZE = TABLE_LENGTH * TABLE_LENGTH * TABLE_LENGTH;
 
     // Local Section->BlockState table. Read-only.
-    private final BlockState[][] blockStatesArrays;
+    private final BlockStatesSectionCopy[] blockStatesArrays;
 
     // A pointer to the BlockState array for the origin section.
-    private final BlockState[] originBlockStates;
+    private final BlockStatesSectionCopy originBlockStates;
 
     // Local Section->Light table. Read-only.
     private final ChunkNibbleArray[] blockLightArrays;
@@ -115,6 +115,16 @@ public class WorldSlice extends ReusableObject implements BlockRenderView, Biome
     // The chunk origin of this slice
     private ChunkSectionPos origin;
 
+    private static class BlockStatesSectionCopy {
+        private final BlockState[] palette;
+        private final long[][] indexes;
+
+        private BlockStatesSectionCopy(BlockState[] palette, long[][] indexes) {
+            this.palette = palette;
+            this.indexes = indexes;
+        }
+    }
+
     public static WorldChunk[] createChunkSlice(World world, ChunkSectionPos pos) {
         WorldChunk chunk = world.getChunk(pos.getX(), pos.getZ());
         ChunkSection section = chunk.getSectionArray()[pos.getY()];
@@ -145,12 +155,13 @@ public class WorldSlice extends ReusableObject implements BlockRenderView, Biome
     }
 
     public WorldSlice() {
-        this.blockStatesArrays = new BlockState[SECTION_TABLE_ARRAY_SIZE][];
+        this.blockStatesArrays = new BlockStatesSectionCopy[SECTION_TABLE_ARRAY_SIZE];
 
         for (int x = 0; x < SECTION_LENGTH; x++) {
             for (int y = 0; y < SECTION_LENGTH; y++) {
                 for (int z = 0; z < SECTION_LENGTH; z++) {
-                    this.blockStatesArrays[getLocalSectionIndex(x, y, z)] = new BlockState[SECTION_BLOCK_COUNT];
+                    // TODO: what size should the palette be?
+                    this.blockStatesArrays[getLocalSectionIndex(x, y, z)] = new BlockStatesSectionCopy(new BlockState[64], new long[16][256]);
                 }
             }
         }
@@ -235,43 +246,106 @@ public class WorldSlice extends ReusableObject implements BlockRenderView, Biome
         PackedIntegerArray intArray = container.data;
         Palette<BlockState> palette = container.palette;
 
-        BlockState[] dst = this.blockStatesArrays[sectionIdx];
+        BlockStatesSectionCopy dst = this.blockStatesArrays[sectionIdx];
 
-        int minBlockX = Math.max(this.minX, pos.getMinX());
-        int maxBlockX = Math.min(this.maxX, pos.getMaxX());
+        // TODO: could memcpy/accelerate this depending on the implementation?
+        for (int i = 0; i <= intArray.maxValue; i++) {
+            BlockState result = palette.getByIndex(i);
+            if (result == null) {
+                dst.palette[i] = container.defaultValue;
+            } else {
+                dst.palette[i] = result;
+            }
+        }
 
-        int minBlockY = Math.max(this.minY, pos.getMinY());
-        int maxBlockY = Math.min(this.maxY, pos.getMaxY());
+        if (intArray.getStorage().length == 256) {
+            if (pos.equals(origin)) {
+                populateBlockArraysFast4BitsOrigin(intArray.getStorage(), this.blockStatesArrays[sectionIdx].indexes);
+            } else {
+                int minBlockX = Math.max(this.minX, pos.getMinX());
+                int maxBlockX = Math.min(this.maxX, pos.getMaxX());
 
-        int minBlockZ = Math.max(this.minZ, pos.getMinZ());
-        int maxBlockZ = Math.min(this.maxZ, pos.getMaxZ());
+                int minBlockY = Math.max(this.minY, pos.getMinY());
+                int maxBlockY = Math.min(this.maxY, pos.getMaxY());
 
-        int prevPaletteId = -1;
-        BlockState prevPaletteState = null;
+                int minBlockZ = Math.max(this.minZ, pos.getMinZ());
+                int maxBlockZ = Math.min(this.maxZ, pos.getMaxZ());
 
-        for (int y = minBlockY; y <= maxBlockY; y++) {
-            for (int z = minBlockZ; z <= maxBlockZ; z++) {
-                for (int x = minBlockX; x <= maxBlockX; x++) {
-                    int blockIdx = getLocalBlockIndex(x & 15, y & 15, z & 15);
-                    int paletteId = intArray.get(blockIdx);
+                populateBlockArraysFast4BitsRange(intArray.getStorage(), this.blockStatesArrays[sectionIdx].indexes,
+                        minBlockX & 15, maxBlockX & 15,
+                        minBlockY & 15, maxBlockY & 15,
+                        minBlockZ & 15, maxBlockZ & 15);
+            }
+        } else {
+            int minBlockX = Math.max(this.minX, pos.getMinX());
+            int maxBlockX = Math.min(this.maxX, pos.getMaxX());
 
-                    BlockState state;
+            int minBlockY = Math.max(this.minY, pos.getMinY());
+            int maxBlockY = Math.min(this.maxY, pos.getMaxY());
 
-                    if (prevPaletteId == paletteId) {
-                        state = prevPaletteState;
-                    } else {
-                        state = palette.getByIndex(paletteId);
-                        if (state == null) {
-                            state = container.defaultValue;
-                        }
+            int minBlockZ = Math.max(this.minZ, pos.getMinZ());
+            int maxBlockZ = Math.min(this.maxZ, pos.getMaxZ());
 
-                        prevPaletteState = state;
-                        prevPaletteId = paletteId;
+            for (int y = minBlockY; y <= maxBlockY; y++) {
+                for (int z = minBlockZ; z <= maxBlockZ; z++) {
+                    for (int x = minBlockX; x <= maxBlockX; x++) {
+                        int blockIdx = getLocalBlockIndex(x & 15, y & 15, z & 15);
+                        int paletteId = intArray.get(blockIdx);
+
+                        dst.indexes[x & 15][(y & 15) << 4 | (z & 15)] = paletteId;
                     }
-
-                    dst[blockIdx] = state;
                 }
             }
+        }
+    }
+
+    private static void populateBlockArraysFast4BitsOrigin(long[] packed, long[][] dst) {
+        for (int i = 0; i < 16; i++) {
+            copyShiftFull(packed, dst[i], i << 2, 15L << (i << 2));
+        }
+    }
+
+    private static void populateBlockArraysFast4BitsRange(long[] packed, long[][] dst,
+                                                          int minBlockX, int maxBlockX,
+                                                          int minBlockY, int maxBlockY,
+                                                          int minBlockZ, int maxBlockZ) {
+        for (int x = minBlockX; x <= maxBlockX; x++) {
+            if (minBlockY == maxBlockY) {
+                copyShiftSection(packed, dst[x], (long) x << 2, 15L << (x << 2), minBlockY << 4, (minBlockY + 1) << 4);
+            } else {
+                for (int y = minBlockY; y <= maxBlockY; y++) {
+                    copyShiftSection(packed, dst[x], (long) x << 2, 15L << (x << 2), y << 4 | minBlockZ, (y << 4 | maxBlockZ) + 1);
+                }
+            }
+        }
+    }
+
+    /**
+     * Fast SIMD-friendly mask + bit shift, for unpacking longs
+     * Iterates over the range [0, 256) - suitable for full 4 bits per block packed chunks
+     * @param packed An array of packed longs
+     * @param dst The destination index array
+     * @param shift The number of bits to shift right by
+     * @param mask The mask to apply
+     */
+    private static void copyShiftFull(long[] packed, long[] dst, long shift, long mask) {
+        for (int blockIdx = 0; blockIdx < 256; blockIdx++) {
+            dst[blockIdx] = (packed[blockIdx] & mask) >>> shift;
+        }
+    }
+
+    /**
+     * Fast SIMD-friendly mask + bit shift, for unpacking longs
+     * @param packed An array of packed longs
+     * @param dst The destination index array
+     * @param shift The number of bits to shift right by
+     * @param mask The mask to apply
+     * @param start The index to start at
+     * @param end The index to end at (exclusive)
+     */
+    private static void copyShiftSection(long[] packed, long[] dst, long shift, long mask, int start, int end) {
+        for (int blockIdx = start; blockIdx < end; blockIdx++) {
+            dst[blockIdx] = (packed[blockIdx] & mask) >>> shift;
         }
     }
 
@@ -284,13 +358,13 @@ public class WorldSlice extends ReusableObject implements BlockRenderView, Biome
         int relX = x - this.baseX;
         int relY = y - this.baseY;
         int relZ = z - this.baseZ;
+        BlockStatesSectionCopy copy = this.blockStatesArrays[getLocalSectionIndex(relX >> 4, relY >> 4, relZ >> 4)];
 
-        return this.blockStatesArrays[getLocalSectionIndex(relX >> 4, relY >> 4, relZ >> 4)]
-                [getLocalBlockIndex(relX & 15, relY & 15, relZ & 15)];
+        return copy.palette[(int) copy.indexes[relX & 15][(relY & 15) << 4 | (relZ & 15)]];
     }
 
     public BlockState getOriginBlockState(int x, int y, int z) {
-        return this.originBlockStates[getLocalBlockIndex(x, y, z)];
+        return this.originBlockStates.palette[(int) this.originBlockStates.indexes[x][(y & 15) << 4 | (z & 15)]];
     }
 
     @Override
