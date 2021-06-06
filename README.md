@@ -1,0 +1,1 @@
+The change that this fork applied on the 1.16.x/next branch is no longer necessary - please see [upstream Sodium](https://github.com/CaffeineMC/sodium-fabric). This repository still exists to host a few experiments on separate branches, but the primary branch is replaced by this notice to reduce confusion.
